@@ -4,6 +4,7 @@ Release:        %{vencord_release}%{?dist}
 Summary:        Custom Vencord build for Vesktop with VesktopClaudeBridge
 License:        GPL-3.0-or-later
 BuildArch:      noarch
+Source0:        vencord-%{vencord_version}.tar.gz
 Requires:       flatpak
 Requires:       nodejs >= 22
 Requires:       python3 >= 3.11
