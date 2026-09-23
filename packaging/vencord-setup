@@ -323,6 +323,7 @@ def rollback(p: dict[str, Path], backup: dict, *, remove_token: bool) -> None:
 
 def enable(p: dict[str, Path]) -> None:
     expected_artifacts = [
+        p["dist"] / "package.json",
         p["dist"] / "vencordDesktopMain.js",
         p["dist"] / "vencordDesktopPreload.js",
         p["dist"] / "vencordDesktopRenderer.js",
@@ -442,7 +443,14 @@ def status(p: dict[str, Path]) -> None:
     plugins = plugin_settings_obj.get("plugins", {})
     plugin = plugins.get(PLUGIN_NAME, {}) if isinstance(plugins, dict) else {}
     codex_entry = codex_server(p["codex_config"])
-    print(f"Package build: {'present' if (p['dist'] / 'vencordDesktopRenderer.js').is_file() else 'missing'}")
+    package_present = all((p["dist"] / name).is_file() for name in (
+        "package.json",
+        "vencordDesktopMain.js",
+        "vencordDesktopPreload.js",
+        "vencordDesktopRenderer.js",
+        "vencordDesktopRenderer.css",
+    ))
+    print(f"Package build: {'present' if package_present else 'missing'}")
     print(f"Vesktop custom location: {'active' if state.get('vencordDir') == str(p['dist']) else 'inactive'}")
     print(f"Bridge plugin: {'enabled' if isinstance(plugin, dict) and plugin.get('enabled') else 'disabled'}")
     print(f"Codex MCP server: {'active' if is_our_server(codex_entry, p) else 'inactive'}")

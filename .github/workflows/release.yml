@@ -75,6 +75,7 @@ jobs:
           stage="${RUNNER_TEMP}/vencord"
           mkdir -p "${stage}/dist" "${stage}/sidecar"
           cp -a dist/. "${stage}/dist/"
+          cp packaging/vencord-package.json "${stage}/dist/package.json"
           cp -a external/VesktopClaudeBridge/sidecar/dist external/VesktopClaudeBridge/sidecar/node_modules external/VesktopClaudeBridge/sidecar/package.json "${stage}/sidecar/"
           cp packaging/vencord-setup "${stage}/vencord-setup"
           cp LICENSE "${stage}/LICENSE-VENCORD"

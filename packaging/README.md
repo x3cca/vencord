@@ -4,6 +4,11 @@ This fork builds Vencord with the pinned VesktopClaudeBridge fork as a source
 userplugin. The RPM is named `vencord` and installs the desktop build to
 `/opt/vencord/dist` and the sidecar to `/opt/vencord/sidecar`.
 
+The Vencord directory includes a `package.json` marker. Vesktop 1.6.7 requires
+that marker and the four desktop bundles before it accepts a custom directory;
+without it, Vesktop tries to create the marker in `/opt`, which is read-only in
+the Flatpak setup.
+
 ## Enable for the current user
 
 ```sh
@@ -49,7 +54,7 @@ npm prune --prefix external/VesktopClaudeBridge/sidecar --omit=dev
 ```
 
 Create a release by pushing a tag matching `vencord-v<package-version>-<release>`
-(for this source version, `vencord-v1.15.6-1`). The release workflow builds and
+(for example, `vencord-v1.15.6-2`). The release workflow builds and
 signs the RPM and repository metadata, uploads the RPM to GitHub Releases, and
 publishes the DNF repository at `https://x3c.ca/vencord/vencord.repo`.
 
