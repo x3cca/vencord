@@ -1,0 +1,3 @@
+[submodule "vesktop-claude-bridge"]
+	path = external/VesktopClaudeBridge
+	url = https://github.com/x3cca/VesktopClaudeBridge.git

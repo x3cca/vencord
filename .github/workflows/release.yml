@@ -1,0 +1,172 @@
+name: Build and publish Fedora repository
+
+on:
+  push:
+    tags:
+      - 'vencord-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: fedora:44
+
+    steps:
+      - name: Install build tools
+        run: >-
+          dnf install -y
+          createrepo_c gh git gnupg2 nodejs npm rpm-build rpm-sign
+
+      - name: Check out source and plugin
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Resolve version and release
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          release=1
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+              [[ "${GITHUB_REF_NAME}" =~ ^vencord-v([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$ ]] || {
+                  echo "Invalid release tag: ${GITHUB_REF_NAME}" >&2
+                  exit 1
+              }
+              tag_version="${BASH_REMATCH[1]}"
+              release="${BASH_REMATCH[2]}"
+              [[ "${tag_version}" == "${version}" ]] || {
+                  echo "Tag version ${tag_version} does not match package version ${version}" >&2
+                  exit 1
+              }
+          fi
+          printf 'version=%s\nrelease=%s\n' "${version}" "${release}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build Vencord and sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run sync --prefix external/VesktopClaudeBridge
+          npx --yes pnpm@11.9.0 install --frozen-lockfile
+          npx --yes pnpm@11.9.0 testTsc
+          npx --yes pnpm@11.9.0 build
+          npm ci --prefix external/VesktopClaudeBridge/sidecar
+          npm run build --prefix external/VesktopClaudeBridge/sidecar
+          npm test --prefix external/VesktopClaudeBridge/sidecar
+          npm prune --prefix external/VesktopClaudeBridge/sidecar --omit=dev
+
+      - name: Build RPM
+        env:
+          VENCORD_VERSION: ${{ steps.version.outputs.version }}
+          VENCORD_RELEASE: ${{ steps.version.outputs.release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="${RUNNER_TEMP}/vencord"
+          mkdir -p "${stage}/dist" "${stage}/sidecar"
+          cp -a dist/. "${stage}/dist/"
+          cp -a external/VesktopClaudeBridge/sidecar/dist external/VesktopClaudeBridge/sidecar/node_modules external/VesktopClaudeBridge/sidecar/package.json "${stage}/sidecar/"
+          cp packaging/vencord-setup "${stage}/vencord-setup"
+          cp LICENSE "${stage}/LICENSE-VENCORD"
+          cp external/VesktopClaudeBridge/LICENSE "${stage}/LICENSE-VESKTOP-CLAUDE-BRIDGE"
+
+          rpm_root="${HOME}/rpmbuild"
+          mkdir -p "${rpm_root}"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          tar -C "${RUNNER_TEMP}" -czf "${rpm_root}/SOURCES/vencord-${VENCORD_VERSION}.tar.gz" vencord
+          cp packaging/vencord.spec "${rpm_root}/SPECS/"
+          rpmbuild -bb \
+              --define "_topdir ${rpm_root}" \
+              --define "vencord_version ${VENCORD_VERSION}" \
+              --define "vencord_release ${VENCORD_RELEASE}" \
+              "${rpm_root}/SPECS/vencord.spec"
+
+      - name: Sign RPM and repository metadata
+        env:
+          RPM_SIGNING_KEY: ${{ secrets.RPM_SIGNING_KEY }}
+          VENCORD_VERSION: ${{ steps.version.outputs.version }}
+          VENCORD_RELEASE: ${{ steps.version.outputs.release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RPM_SIGNING_KEY}"
+          printf '%s' "${RPM_SIGNING_KEY}" > "${RUNNER_TEMP}/rpm-signing-key.asc"
+          gpg --batch --import "${RUNNER_TEMP}/rpm-signing-key.asc"
+          key_id=$(gpg --batch --with-colons --list-secret-keys |
+              awk -F: '$1 == "sec" {print $5; exit}')
+          [[ -n "${key_id}" ]]
+          printf '%%_signature gpg\n%%_gpg_name %s\n' "${key_id}" > "${HOME}/.rpmmacros"
+
+          mkdir -p dist public/rpm
+          rpm_file=$(find "${HOME}/rpmbuild/RPMS/noarch" -maxdepth 1 \
+              -type f -name "vencord-${VENCORD_VERSION}-${VENCORD_RELEASE}*.noarch.rpm" -print -quit)
+          [[ -n "${rpm_file}" ]]
+          rpmsign --addsign "${rpm_file}"
+          cp "${rpm_file}" dist/
+          cp "${rpm_file}" public/rpm/
+          cp packaging/RPM-GPG-KEY-vencord public/
+          cp packaging/vencord.repo public/
+          createrepo_c public/rpm
+          gpg --batch --yes --armor --detach-sign --local-user "${key_id}" \
+              public/rpm/repodata/repomd.xml
+          (cd dist && sha256sum *.rpm > SHA256SUMS)
+          touch public/.nojekyll
+
+      - name: Create repository landing page
+        shell: bash
+        run: |
+          cat > public/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Vencord Fedora repository</title>
+          <h1>Vencord for Fedora</h1>
+          <p>A signed Fedora RPM repository for a custom Vencord build with VesktopClaudeBridge.</p>
+          <pre>sudo dnf config-manager addrepo --from-repofile=https://x3c.ca/vencord/vencord.repo
+          sudo dnf install vencord
+          vencord-setup enable</pre>
+          <p><a href="https://github.com/x3cca/vencord">Source and documentation</a></p>
+          HTML
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: vencord-${{ steps.version.outputs.version }}-${{ steps.version.outputs.release }}
+          path: dist/
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VENCORD_VERSION: ${{ steps.version.outputs.version }}
+          VENCORD_RELEASE: ${{ steps.version.outputs.release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 ||
+              gh release create "${GITHUB_REF_NAME}" --generate-notes --title "Vencord ${VENCORD_VERSION}-${VENCORD_RELEASE}"
+          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+
+      - name: Upload GitHub Pages artifact
+        if: github.ref_type == 'tag'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: public/
+
+  deploy:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy signed Fedora repository
+        id: deployment
+        uses: actions/deploy-pages@v5

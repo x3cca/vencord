@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""Enable or remove the Vencord VesktopClaudeBridge integration for this user."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+
+APP_ID = "dev.vencord.Vesktop"
+PLUGIN_NAME = "VesktopClaudeBridge"
+SERVER_NAME = "vencord"
+MOUNT_PATH = "/opt/vencord"
+
+
+def paths() -> dict[str, Path]:
+    home = Path.home()
+    root = Path(os.environ.get("VENCORD_ROOT", MOUNT_PATH)).resolve()
+    vesktop_config = Path(os.environ.get(
+        "VENCORD_VESKTOP_CONFIG_DIR",
+        home / ".var/app" / APP_ID / "config/vesktop",
+    ))
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+    data_home = Path(os.environ.get("XDG_DATA_HOME", home / ".local/share"))
+    state_home = Path(os.environ.get("XDG_STATE_HOME", home / ".local/state"))
+    codex_home = Path(os.environ.get("CODEX_HOME", home / ".codex"))
+    return {
+        "root": root,
+        "dist": root / "dist",
+        "sidecar": root / "sidecar",
+        "sidecar_entry": root / "sidecar/dist/index.js",
+        "vesktop_config": vesktop_config,
+        "vesktop_state": vesktop_config / "state.json",
+        "vesktop_settings": vesktop_config / "settings/settings.json",
+        "bridge_config": vesktop_config / "vencord-bridge",
+        "token": vesktop_config / "vencord-bridge/token",
+        "marker": state_home / "vencord/setup.json",
+        "codex_config": codex_home / "config.toml",
+        "flatpak_override": data_home / "flatpak/overrides" / APP_ID,
+    }
+
+
+def fail(message: str) -> None:
+    raise RuntimeError(message)
+
+
+def run(
+    args: list[str], *, capture: bool = False, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            args,
+            check=True,
+            text=True,
+            env={**os.environ, **env} if env else None,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+        )
+    except FileNotFoundError:
+        fail(f"Required command was not found: {args[0]}")
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        fail(f"Command failed ({' '.join(args)}): {detail or exc.returncode}")
+
+
+def read_json(path: Path) -> tuple[dict, bool]:
+    if not path.exists():
+        return {}, False
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"Cannot read valid JSON from {path}: {exc}")
+    if not isinstance(value, dict):
+        fail(f"Expected a JSON object in {path}")
+    return value, True
+
+
+def write_json(path: Path, value: dict, mode: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if mode is None:
+        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, indent=4, ensure_ascii=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+
+
+def plugin_settings(settings: dict) -> dict:
+    plugins = settings.setdefault("plugins", {})
+    if not isinstance(plugins, dict):
+        fail("Vencord settings.json has a non-object 'plugins' value")
+    plugin = plugins.setdefault(PLUGIN_NAME, {})
+    if not isinstance(plugin, dict):
+        fail(f"Vencord settings for {PLUGIN_NAME} are not an object")
+    return plugin
+
+
+def codex_server(config_path: Path) -> dict | None:
+    if not config_path.exists():
+        return None
+    try:
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        fail(f"Cannot parse Codex config {config_path}: {exc}")
+    servers = config.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        fail("Codex config has a non-table 'mcp_servers' value")
+    value = servers.get(SERVER_NAME)
+    return value if isinstance(value, dict) else None
+
+
+def expected_server(p: dict[str, Path]) -> dict:
+    return {
+        "command": "node",
+        "args": [str(p["sidecar_entry"])],
+        "env": {"VCB_CONFIG_DIR": str(p["bridge_config"])},
+    }
+
+
+def is_our_server(entry: dict | None, p: dict[str, Path]) -> bool:
+    if entry is None:
+        return False
+    expected = expected_server(p)
+    return all(entry.get(key) == value for key, value in expected.items())
+
+
+def flatpak_entries(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    in_context = False
+    entries: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_context = stripped.lower() == "[context]"
+        elif in_context and stripped.lower().startswith("filesystems="):
+            raw = stripped.split("=", 1)[1]
+            entries.update(part for part in raw.split(";") if part)
+    return entries
+
+
+def grant_flatpak(p: dict[str, Path]) -> bool:
+    before = flatpak_entries(p["flatpak_override"])
+    path_before = any(item.split(":", 1)[0] == str(p["root"]) for item in before)
+    if not path_before:
+        run(["flatpak", "override", "--user", f"--filesystem={p['root']}:ro", APP_ID])
+    return not path_before
+
+
+def remove_flatpak_grant(p: dict[str, Path]) -> None:
+    path = p["flatpak_override"]
+    if not path.exists():
+        return
+    original = path.read_text(encoding="utf-8")
+    lines = original.splitlines()
+    output: list[str] = []
+    in_context = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_context = stripped.lower() == "[context]"
+            output.append(line)
+            continue
+        if in_context and stripped.lower().startswith("filesystems="):
+            key, raw = line.split("=", 1)
+            trailing_semicolon = raw.rstrip().endswith(";")
+            entries = [entry for entry in raw.strip().split(";") if entry]
+            kept = [entry for entry in entries if entry.split(":", 1)[0] != str(p["root"])]
+            if kept:
+                value = ";".join(kept) + (";" if trailing_semicolon else "")
+                output.append(f"{key}={value}")
+            continue
+        output.append(line)
+
+    # Remove a now-empty Context section while leaving every other override intact.
+    compact: list[str] = []
+    i = 0
+    while i < len(output):
+        if output[i].strip().lower() == "[context]":
+            j = i + 1
+            section: list[str] = []
+            while j < len(output) and not (output[j].strip().startswith("[") and output[j].strip().endswith("]")):
+                section.append(output[j])
+                j += 1
+            if any(line.strip() and not line.lstrip().startswith("#") for line in section):
+                compact.append(output[i])
+                compact.extend(section)
+            i = j
+        else:
+            compact.append(output[i])
+            i += 1
+    content = "\n".join(compact).strip()
+    if content:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content + "\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def backup_current(p: dict[str, Path], token: str, token_existed: bool) -> dict:
+    state, state_exists = read_json(p["vesktop_state"])
+    settings, settings_exists = read_json(p["vesktop_settings"])
+    plugins = settings.get("plugins", {}) if isinstance(settings.get("plugins", {}), dict) else {}
+    plugin = plugins.get(PLUGIN_NAME, {}) if isinstance(plugins, dict) else {}
+    if not isinstance(plugin, dict):
+        fail(f"Vencord settings for {PLUGIN_NAME} are not an object")
+    return {
+        "version": 1,
+        "dist": str(p["dist"]),
+        "stateFileExisted": state_exists,
+        "stateFileMode": stat.S_IMODE(p["vesktop_state"].stat().st_mode) if state_exists else None,
+        "vencordDirPresent": "vencordDir" in state,
+        "vencordDir": state.get("vencordDir"),
+        "settingsFileExisted": settings_exists,
+        "settingsFileMode": stat.S_IMODE(p["vesktop_settings"].stat().st_mode) if settings_exists else None,
+        "pluginObjectExisted": PLUGIN_NAME in plugins,
+        "enabledPresent": "enabled" in plugin,
+        "enabled": plugin.get("enabled"),
+        "tokenInboxPresent": "tokenInbox" in plugin,
+        "tokenInbox": plugin.get("tokenInbox"),
+        "tokenExisted": token_existed,
+        "tokenHash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+        "flatpakGrantAdded": False,
+    }
+
+
+def restore_json(p: dict[str, Path], backup: dict) -> None:
+    state_path = p["vesktop_state"]
+    state, state_exists = read_json(state_path)
+    if state.get("vencordDir") == backup["dist"]:
+        if backup["vencordDirPresent"]:
+            state["vencordDir"] = backup.get("vencordDir")
+        else:
+            state.pop("vencordDir", None)
+        if state or backup["stateFileExisted"]:
+            mode = backup.get("stateFileMode") if backup["stateFileExisted"] else None
+            write_json(state_path, state, mode)
+        else:
+            state_path.unlink(missing_ok=True)
+
+    settings_path = p["vesktop_settings"]
+    settings, _ = read_json(settings_path)
+    plugins = settings.get("plugins")
+    if isinstance(plugins, dict):
+        plugin = plugins.get(PLUGIN_NAME)
+        if isinstance(plugin, dict):
+            if plugin.get("enabled") is True:
+                if backup["enabledPresent"]:
+                    plugin["enabled"] = backup.get("enabled")
+                else:
+                    plugin.pop("enabled", None)
+            inbox = plugin.get("tokenInbox")
+            if inbox == backup.get("activeToken") or inbox == "":
+                if backup["tokenInboxPresent"]:
+                    plugin["tokenInbox"] = backup.get("tokenInbox")
+                else:
+                    plugin.pop("tokenInbox", None)
+            if not backup["pluginObjectExisted"] and not plugin:
+                plugins.pop(PLUGIN_NAME, None)
+            if not plugins:
+                settings.pop("plugins", None)
+            if settings or backup["settingsFileExisted"]:
+                mode = backup.get("settingsFileMode") if backup["settingsFileExisted"] else None
+                write_json(settings_path, settings, mode)
+            else:
+                settings_path.unlink(missing_ok=True)
+
+
+def remove_server_if_owned(p: dict[str, Path]) -> bool:
+    entry = codex_server(p["codex_config"])
+    if entry is None:
+        return False
+    if not is_our_server(entry, p):
+        print("Preserved Codex MCP entry 'vencord' because it no longer matches this integration.")
+        return False
+    run(["codex", "mcp", "remove", SERVER_NAME])
+    return True
+
+
+def rollback(p: dict[str, Path], backup: dict, *, remove_token: bool) -> None:
+    try:
+        remove_server_if_owned(p)
+    except Exception as exc:  # keep rolling back independent pieces
+        print(f"Rollback could not remove the Codex server: {exc}", file=sys.stderr)
+    try:
+        restore_json(p, backup)
+    except Exception as exc:
+        print(f"Rollback could not restore Vesktop settings: {exc}", file=sys.stderr)
+    if backup.get("flatpakGrantAdded"):
+        try:
+            remove_flatpak_grant(p)
+        except Exception as exc:
+            print(f"Rollback could not remove the Flatpak grant: {exc}", file=sys.stderr)
+    if remove_token:
+        try:
+            if p["token"].exists():
+                digest = hashlib.sha256(p["token"].read_text(encoding="utf-8").strip().encode("utf-8")).hexdigest()
+                if digest == backup.get("tokenHash"):
+                    p["token"].unlink()
+        except OSError as exc:
+            print(f"Rollback could not remove the generated token: {exc}", file=sys.stderr)
+    p["marker"].unlink(missing_ok=True)
+
+
+def enable(p: dict[str, Path]) -> None:
+    expected_artifacts = [
+        p["dist"] / "vencordDesktopMain.js",
+        p["dist"] / "vencordDesktopPreload.js",
+        p["dist"] / "vencordDesktopRenderer.js",
+        p["dist"] / "vencordDesktopRenderer.css",
+        p["sidecar_entry"],
+    ]
+    missing = [str(path) for path in expected_artifacts if not path.is_file()]
+    if missing:
+        fail("The installed Vencord build is incomplete:\n  " + "\n  ".join(missing))
+
+    run(["flatpak", "info", APP_ID], capture=True)
+    if shutil.which("codex") is None:
+        fail("Codex CLI was not found on PATH. Install Codex, then run this command again.")
+    if shutil.which("node") is None:
+        fail("Node.js was not found on PATH.")
+
+    existing_marker, marker_exists = read_json(p["marker"])
+    existing_server = codex_server(p["codex_config"])
+    if marker_exists and existing_marker.get("version") != 1:
+        fail(f"Unknown setup backup format in {p['marker']}; no changes were made.")
+    if marker_exists and existing_marker.get("dist") != str(p["dist"]):
+        fail("An integration is already enabled from a different Vencord directory; disable it first.")
+    if existing_server is not None:
+        if not marker_exists or not is_our_server(existing_server, p):
+            fail("Codex already has an MCP server named 'vencord'; it was left unchanged.")
+
+    # Validate both JSON files before the sidecar is allowed to create a token.
+    read_json(p["vesktop_state"])
+    settings_before, _ = read_json(p["vesktop_settings"])
+    plugins_before = settings_before.get("plugins", {})
+    if not isinstance(plugins_before, dict):
+        fail("Vencord settings.json has a non-object 'plugins' value")
+    if PLUGIN_NAME in plugins_before and not isinstance(plugins_before[PLUGIN_NAME], dict):
+        fail(f"Vencord settings for {PLUGIN_NAME} are not an object")
+
+    p["bridge_config"].mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(p["bridge_config"], 0o700)
+    token_existed = p["token"].exists()
+    if token_existed:
+        token_existed = len(p["token"].read_text(encoding="utf-8").strip()) >= 16
+    token_result = run(
+        ["node", str(p["sidecar_entry"]), "--print-token"],
+        capture=True,
+        env={
+            "VCB_CONFIG_DIR": str(p["bridge_config"]),
+            "VCB_DOWNLOAD_DIR": str(p["bridge_config"] / "downloads"),
+        },
+    )
+    token = (token_result.stdout or "").strip()
+    if len(token) < 16:
+        fail("The bridge did not return a valid token.")
+    os.chmod(p["token"], 0o600)
+
+    if marker_exists and existing_marker.get("version") == 1:
+        backup = existing_marker
+        backup["activeToken"] = token
+        backup["tokenHash"] = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    else:
+        backup = backup_current(p, token, token_existed)
+        backup["activeToken"] = token
+        write_json(p["marker"], backup)
+
+    try:
+        state, _ = read_json(p["vesktop_state"])
+        state["vencordDir"] = str(p["dist"])
+        write_json(p["vesktop_state"], state)
+
+        settings, _ = read_json(p["vesktop_settings"])
+        plugin = plugin_settings(settings)
+        plugin["enabled"] = True
+        plugin["tokenInbox"] = token
+        write_json(p["vesktop_settings"], settings)
+
+        grant_added_now = grant_flatpak(p)
+        backup["flatpakGrantAdded"] = backup.get("flatpakGrantAdded", False) or grant_added_now
+        write_json(p["marker"], backup)
+
+        if not is_our_server(codex_server(p["codex_config"]), p):
+            run([
+                "codex", "mcp", "add", "--env",
+                f"VCB_CONFIG_DIR={p['bridge_config']}",
+                SERVER_NAME, "--", "node", str(p["sidecar_entry"]),
+            ])
+        write_json(p["marker"], backup)
+    except Exception:
+        rollback(p, backup, remove_token=not token_existed)
+        raise
+
+    print("Vencord integration enabled.")
+    print("Fully quit and restart Vesktop and Codex to load the new build and MCP server.")
+
+
+def disable(p: dict[str, Path]) -> None:
+    backup, exists = read_json(p["marker"])
+    if not exists:
+        print("Vencord integration is not enabled by vencord-setup.")
+        return
+    if backup.get("version") != 1:
+        fail(f"Unknown setup backup format in {p['marker']}; no changes were made.")
+
+    remove_server_if_owned(p)
+    restore_json(p, backup)
+    if backup.get("flatpakGrantAdded"):
+        remove_flatpak_grant(p)
+    if not backup.get("tokenExisted") and p["token"].exists():
+        digest = hashlib.sha256(p["token"].read_text(encoding="utf-8").strip().encode("utf-8")).hexdigest()
+        if digest == backup.get("tokenHash"):
+            p["token"].unlink()
+    p["marker"].unlink(missing_ok=True)
+    print("Vencord integration disabled; Vesktop will use its bundled Vencord after restart.")
+
+
+def status(p: dict[str, Path]) -> None:
+    backup, enabled = read_json(p["marker"])
+    state, _ = read_json(p["vesktop_state"])
+    plugin_settings_obj, _ = read_json(p["vesktop_settings"])
+    plugins = plugin_settings_obj.get("plugins", {})
+    plugin = plugins.get(PLUGIN_NAME, {}) if isinstance(plugins, dict) else {}
+    codex_entry = codex_server(p["codex_config"])
+    print(f"Package build: {'present' if (p['dist'] / 'vencordDesktopRenderer.js').is_file() else 'missing'}")
+    print(f"Vesktop custom location: {'active' if state.get('vencordDir') == str(p['dist']) else 'inactive'}")
+    print(f"Bridge plugin: {'enabled' if isinstance(plugin, dict) and plugin.get('enabled') else 'disabled'}")
+    print(f"Codex MCP server: {'active' if is_our_server(codex_entry, p) else 'inactive'}")
+    print(f"Setup backup: {'present' if enabled else 'absent'}")
+    if enabled and backup.get("flatpakGrantAdded"):
+        print("Flatpak read access: granted by this setup")
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or sys.argv[1] not in {"enable", "disable", "status"}:
+        print("Usage: vencord-setup enable|disable|status", file=sys.stderr)
+        return 2
+    p = paths()
+    try:
+        if sys.argv[1] == "enable":
+            enable(p)
+        elif sys.argv[1] == "disable":
+            disable(p)
+        else:
+            status(p)
+    except Exception as exc:
+        print(f"vencord-setup: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,10 @@
+[vencord]
+name=Vencord for Fedora - $basearch
+baseurl=https://x3c.ca/vencord/rpm/
+enabled=1
+type=rpm
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://x3c.ca/vencord/RPM-GPG-KEY-vencord
+metadata_expire=1h
+skip_if_unavailable=0
