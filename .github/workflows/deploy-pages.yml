@@ -30,6 +30,9 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ github.event.workflow_run.id }}
 
+      - name: Unpack signed repository site
+        run: tar -xf public/artifact.tar -C public/ && rm public/artifact.tar
+
       - name: Upload site for this deployment
         uses: actions/upload-pages-artifact@v5
         with:
