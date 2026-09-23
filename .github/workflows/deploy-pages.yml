@@ -1,0 +1,40 @@
+name: Deploy Fedora repository to Pages
+
+on:
+  workflow_run:
+    workflows: [Build and publish Fedora repository]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      ((github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'vencord-v')) ||
+      (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_branch == 'main'))
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download signed repository site
+        uses: actions/download-artifact@v5
+        with:
+          name: github-pages
+          path: public/
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Upload site for this deployment
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: public/
+
+      - name: Deploy signed Fedora repository
+        id: deployment
+        uses: actions/deploy-pages@v5

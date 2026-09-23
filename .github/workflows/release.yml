@@ -157,19 +157,7 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
 
       - name: Upload GitHub Pages artifact
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         uses: actions/upload-pages-artifact@v5
         with:
           path: public/
-
-  deploy:
-    if: github.ref_type == 'tag'
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy signed Fedora repository
-        id: deployment
-        uses: actions/deploy-pages@v5
