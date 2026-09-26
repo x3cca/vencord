@@ -1,8 +1,8 @@
 # Fedora package
 
-This fork builds Vencord with the pinned VesktopClaudeBridge fork as a source
-userplugin. The RPM is named `vencord` and installs the desktop build to
-`/opt/vencord/dist` and the sidecar to `/opt/vencord/sidecar`.
+This fork builds Vencord with the pinned VesktopClaudeBridge and VencordCtrlMute
+repositories as source userplugins. The RPM is named `vencord` and installs the
+desktop build to `/opt/vencord/dist` and the sidecar to `/opt/vencord/sidecar`.
 
 The Vencord directory includes a `package.json` marker. Vesktop 1.6.7 requires
 that marker and the four desktop bundles before it accepts a custom directory;
@@ -39,8 +39,9 @@ unrelated settings and Codex servers intact. Restart both apps after disabling.
 
 ## Build and publish
 
-The Git submodule pins the source plugin and sidecar at a reviewed bridge
-commit. Regenerate the ignored protocol copies before building:
+The Git submodules pin the bridge plugin and sidecar, and the Ctrl Mute plugin,
+at reviewed commits. Regenerate the ignored bridge protocol copies before
+building:
 
 ```sh
 npm run sync --prefix external/VesktopClaudeBridge

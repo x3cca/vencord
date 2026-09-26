@@ -22,7 +22,7 @@ jobs:
           dnf install -y
           createrepo_c gh git gnupg2 nodejs npm rpm-build rpm-sign
 
-      - name: Check out source and plugin
+      - name: Check out source and plugin repositories
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -130,7 +130,7 @@ jobs:
           <meta charset="utf-8">
           <title>Vencord Fedora repository</title>
           <h1>Vencord for Fedora</h1>
-          <p>A signed Fedora RPM repository for a custom Vencord build with VesktopClaudeBridge.</p>
+          <p>A signed Fedora RPM repository for a custom Vencord build with VesktopClaudeBridge and VencordCtrlMute.</p>
           <pre>sudo dnf config-manager addrepo --from-repofile=https://x3c.ca/vencord/vencord.repo
           sudo dnf install vencord
           vencord-setup enable</pre>

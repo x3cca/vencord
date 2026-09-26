@@ -1,3 +1,6 @@
 [submodule "vesktop-claude-bridge"]
 	path = external/VesktopClaudeBridge
 	url = https://github.com/x3cca/VesktopClaudeBridge.git
+[submodule "vencord-ctrl-mute"]
+	path = external/VencordCtrlMute
+	url = https://github.com/x3cca/VencordCtrlMute.git
