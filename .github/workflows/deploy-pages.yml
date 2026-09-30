@@ -39,7 +39,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CURRENT_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
-          latest_tag=$(gh release list --limit 1000 --json tagName --jq '.[].tagName' |
+          set -euo pipefail
+          latest_tag=$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 1000 --json tagName --jq '.[].tagName' |
               grep -E '^vencord-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' |
               sort -V | tail -n 1)
           if [[ "${CURRENT_TAG}" == "${latest_tag}" ]]; then
