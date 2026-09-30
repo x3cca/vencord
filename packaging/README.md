@@ -17,8 +17,11 @@ vencord-setup enable
 
 The helper keeps Vesktop's other settings, sets `vencordDir`, enables the
 VesktopClaudeBridge plugin, grants the Flatpak read-only access to
-`/opt/vencord`, and registers a stdio MCP server named `vencord` in Codex's
-global configuration. The bridge token stays in the per-user Vesktop config
+`/opt/vencord`, installs the bundled Vesktop launcher for the current user,
+and registers a stdio MCP server named `vencord` in Codex's global
+configuration. The launcher runs the Vesktop Flatpak and sets
+`StartupNotify=false`; its user-local desktop entry takes precedence over the
+Flatpak export. The bridge token stays in the per-user Vesktop config
 directory with mode `0600`; its starter sidecar config denies DMs.
 
 Fully quit and restart Vesktop and Codex after enabling. Check the setup with:
@@ -34,8 +37,9 @@ To remove the setup and return Vesktop to its bundled Vencord:
 vencord-setup disable
 ```
 
-The helper restores the original `vencordDir` and plugin toggles while keeping
-unrelated settings and Codex servers intact. Restart both apps after disabling.
+The helper restores the original `vencordDir`, plugin toggles, and desktop
+launcher while keeping unrelated settings and Codex servers intact. It
+preserves launcher edits made after setup. Restart both apps after disabling.
 
 ## Build and publish
 
@@ -58,6 +62,9 @@ Create a release by pushing a tag matching `vencord-v<package-version>-<release>
 (for example, `vencord-v1.15.6-2`). The release workflow builds and
 signs the RPM and repository metadata, uploads the RPM to GitHub Releases, and
 publishes the DNF repository at `https://x3c.ca/vencord/vencord.repo`.
+Manual workflow runs create build artifacts only; only validated release tags
+publish to the stable DNF repository. RPMs from earlier tagged releases remain
+in the repository so cached metadata and package downgrades continue to work.
 
 The workflow reads its dedicated private signing key from the GitHub Actions
 secret `RPM_SIGNING_KEY`; only the public key is tracked in this repository.

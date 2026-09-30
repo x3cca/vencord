@@ -15,8 +15,8 @@ jobs:
   deploy:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
-      ((github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'vencord-v')) ||
-      (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_branch == 'main'))
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'vencord-v')
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -33,11 +33,29 @@ jobs:
       - name: Unpack signed repository site
         run: tar -xf public/artifact.tar -C public/ && rm public/artifact.tar
 
+      - name: Check this is the newest release
+        id: freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          latest_tag=$(gh release list --limit 1000 --json tagName --jq '.[].tagName' |
+              grep -E '^vencord-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' |
+              sort -V | tail -n 1)
+          if [[ "${CURRENT_TAG}" == "${latest_tag}" ]]; then
+              echo 'publish=true' >> "${GITHUB_OUTPUT}"
+          else
+              echo "Skipping stale Pages deployment for ${CURRENT_TAG}; latest release is ${latest_tag}."
+              echo 'publish=false' >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Upload site for this deployment
+        if: steps.freshness.outputs.publish == 'true'
         uses: actions/upload-pages-artifact@v5
         with:
           path: public/
 
       - name: Deploy signed Fedora repository
         id: deployment
+        if: steps.freshness.outputs.publish == 'true'
         uses: actions/deploy-pages@v5
