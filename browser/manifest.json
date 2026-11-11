@@ -10,12 +10,9 @@
         "128": "icon.png"
     },
 
-    "host_permissions": [
-        "*://*.discord.com/*",
-        "https://raw.githubusercontent.com/*"
-    ],
+    "host_permissions": ["*://*.discord.com/*", "https://raw.githubusercontent.com/*"],
 
-    "permissions": ["declarativeNetRequest"],
+    "permissions": ["declarativeNetRequestWithHostAccess"],
 
     "content_scripts": [
         {
