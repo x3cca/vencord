@@ -57,9 +57,9 @@ jobs:
         run: |
           set -euo pipefail
           npm run sync --prefix external/VesktopClaudeBridge
-          npx --yes pnpm@11.9.0 install --frozen-lockfile
-          npx --yes pnpm@11.9.0 testTsc
-          npx --yes pnpm@11.9.0 build
+          npx --yes pnpm@12.15.0 install --frozen-lockfile
+          npx --yes pnpm@12.15.0 test:ts
+          npx --yes pnpm@12.15.0 build
           npm ci --prefix external/VesktopClaudeBridge/sidecar
           npm run build --prefix external/VesktopClaudeBridge/sidecar
           npm test --prefix external/VesktopClaudeBridge/sidecar
