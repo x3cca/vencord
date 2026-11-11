@@ -1,0 +1,115 @@
+name: Fedora nightly
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fedora-nightly
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: fedora:44
+    permissions:
+      actions: write
+    outputs:
+      changed: ${{ steps.source.outputs.changed }}
+    steps:
+      - name: Install build tools
+        run: dnf install -y createrepo_c git gnupg2 nodejs npm rpm-build rpm-sign
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Merge latest upstream Vencord
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+          git fetch https://github.com/Vendicated/Vencord.git main
+          git merge --no-edit FETCH_HEAD
+
+      - name: Skip if nothing changed since the published build
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+              echo "fork $GITHUB_SHA"
+              echo "upstream $(git rev-parse FETCH_HEAD)"
+              echo "VesktopClaudeBridge $(git ls-remote https://github.com/x3cca/VesktopClaudeBridge.git HEAD | cut -f1)"
+              echo "VencordCtrlMute $(git ls-remote https://github.com/x3cca/VencordCtrlMute.git HEAD | cut -f1)"
+          } > "$RUNNER_TEMP/source.txt"
+          cat "$RUNNER_TEMP/source.txt"
+          published=$(curl -fsS https://x3c.ca/vencord/source.txt || true)
+          if [[ "$GITHUB_EVENT_NAME" == schedule && "$published" == "$(cat "$RUNNER_TEMP/source.txt")" ]]; then
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # GitHub disables scheduled workflows after 60 days without repository activity
+      - name: Keep schedule alive
+        run: >-
+          curl -fsS -X PUT
+          -H "Authorization: Bearer ${{ github.token }}"
+          "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/fedora-nightly.yml/enable"
+
+      - name: Build RPM
+        if: steps.source.outputs.changed == 'true'
+        run: packaging/build.sh public/rpm
+
+      - name: Sign RPM and create repository
+        if: steps.source.outputs.changed == 'true'
+        shell: bash
+        env:
+          RPM_SIGNING_KEY: ${{ secrets.RPM_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          gpg --batch --import <<< "$RPM_SIGNING_KEY"
+          fpr=$(gpg --batch --with-colons --show-keys packaging/RPM-GPG-KEY-vencord | awk -F: '$1 == "fpr" {print $10; exit}')
+          printf '%%_signature gpg\n%%_gpg_name %s\n' "$fpr" > ~/.rpmmacros
+          rpmsign --addsign public/rpm/*.rpm
+          rpm --import packaging/RPM-GPG-KEY-vencord
+          rpmkeys --checksig public/rpm/*.rpm
+          createrepo_c public/rpm
+          gpg --batch --yes --armor --detach-sign --local-user "$fpr" public/rpm/repodata/repomd.xml
+          cp packaging/RPM-GPG-KEY-vencord packaging/vencord.repo "$RUNNER_TEMP/source.txt" public/
+          touch public/.nojekyll
+          cat > public/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Vencord Fedora repository</title>
+          <h1>Vencord nightly for Fedora</h1>
+          <pre>sudo dnf config-manager addrepo --from-repofile=https://x3c.ca/vencord/vencord.repo
+          sudo dnf install vencord
+          vencord-setup enable</pre>
+          <p><a href="source.txt">Built from</a> · <a href="https://github.com/x3cca/vencord">Source</a></p>
+          HTML
+
+      - uses: actions/upload-pages-artifact@v5
+        if: steps.source.outputs.changed == 'true'
+        with:
+          path: public/
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
